@@ -166,6 +166,7 @@ FocusScope {
                 isTranscoding:      d.forceTranscode || false,
                 selectedAudioId:    d.selectedAudioId,
                 selectedSubtitleId: d.selectedSubtitleId,
+                markers:            d.markers || [],
                 // The queue owns advancing: the season-based autoplay chain must
                 // not also fire at the end of an episode inside a playlist. A
                 // jukebox is the other way round — it rides on that same chain,

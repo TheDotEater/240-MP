@@ -20,6 +20,13 @@ public:
     Q_INVOKABLE QString  get_active_user_name();
     Q_INVOKABLE QString  get_active_server_name();
     Q_INVOKABLE QVariantList get_switchable_servers();
+    // True when the signed-in account has Plex Pass (cached in plex_auth.json).
+    // Gates intro/credits skip. Account-level on purpose: every profile in the
+    // app belongs to that account's Plex Home and shares its Pass, and marker
+    // detection runs on the owner's server, so a managed user qualifies through
+    // the owner. The Player re-checks it because module settings are shared by
+    // every profile and outlive a lapsed subscription.
+    Q_INVOKABLE bool     has_plex_pass() const;
     Q_INVOKABLE void     build_stream_url(const QString &ratingKey,
                                           const QString &partKey,
                                           const QString &sessionId);
@@ -129,6 +136,7 @@ public:
     Q_INVOKABLE void getLibraries();
     Q_INVOKABLE void getVideoQualities();
     Q_INVOKABLE void get_resume_playback_options();
+    Q_INVOKABLE void get_skip_credits_options();
     Q_INVOKABLE void applyCurrentUserSetting();
     Q_INVOKABLE void applyCurrentServerSetting();
     Q_INVOKABLE void reset_device_check();
@@ -267,6 +275,18 @@ private:
 
     // User the current_user_id setting selected but whose switch needs a PIN.
     QString m_pendingPinUserId;
+
+    // Plex Pass check for the skip settings (see has_plex_pass). The result is
+    // cached as "account_plex_pass" and reported to Settings as
+    // dynamicOptionsReady("_capabilities", ["plexpass"] or []).
+    void fetchPlexPass();
+    void emitCapabilities();
+    // Shared option list for the three skip settings (ids off / auto / button).
+    static QVariantList skipModeOptions();
+    // One background refresh per session, so a new or lapsed Pass is picked up
+    // without a restart while Settings still opens instantly from the cache.
+    bool m_plexPassFetchInFlight = false;
+    bool m_plexPassRefreshed     = false;
 
     // PIN auth
     void pollPinTick();

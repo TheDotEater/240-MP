@@ -102,6 +102,7 @@ Additional fields any setting may carry:
 - `key` — the config key written under `modules.<id>.<key>` in `config.json`. Supports dot-notation.
 - `label` — display text in Settings.
 - `requires_auth` — if `true`, the setting is only shown when the module reports an authenticated state via `get_module_auth_state(moduleId)`. Used by Plex to hide server/user/library settings until sign-in.
+- `requires_capability` — a string; the setting is only shown when it appears in the list the backend reports via `dynamicOptionsReady("_capabilities", [..])`. Settings rebuilds its list each time that arrives, and calls the `options_slot` of any dynamic setting it just revealed. The Settings screen is recreated on every visit, so the backend should re-emit its cached list from an `options_slot` that is always visible (Jellyfin uses `getLibraries`, Plex `getUsers`). Jellyfin reports `mediasegments`; Plex reports `plexpass` when the signed-in account has Plex Pass.
 
 ### Dynamic options and apply slots
 
@@ -250,6 +251,8 @@ app constants →
 ### Custom OSC (Lua)
 
 The on-screen controls mpv shows during playback are custom Lua scripts in `scripts/` (`mpv-osc.lua` for normal playback, `mpv-osc-ambient.lua` for Ambient Mode), loaded via mpv's `--script=` flag. Options are passed in with `--script-opts=` (e.g. `transcode-offset=<sec>`). The remote's key events reach these scripts through the `keypress` IPC bridge described above.
+
+**Skip button (intro/credits).** Module-agnostic: a Player calls `mpvController.showOsdSkipPrompt()` when the playhead enters a skippable segment (adds a focused SKIP button and opens the menu) and `clearOsdPrompt()` when it leaves. Pressing SKIP sends a `skip-segment` script message, which `MpvController` surfaces as `skipRequested()`; the Player seeks past the segment itself. Where the segments come from is the module's business — Jellyfin fetches `/MediaSegments/{id}`, Plex reads the `Marker` array that `includeMarkers=1` adds to `/library/metadata/{key}` (parsed into `markers` by `buildItemDetail`). Plex gates its skip settings on the **signed-in account's** Plex Pass (`subscription.active` / the `plexpass` role from plex.tv `/api/v2/user`, cached as `account_plex_pass`) rather than the active profile's: managed users get skip through the Home admin's Pass, and plex.tv's per-user `entitlements` list is platform names, not features. The Player re-checks it via `has_plex_pass()` because module settings are shared by every profile.
 
 ### Raspberry Pi headless hand-off (EGLFS)
 

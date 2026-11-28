@@ -140,6 +140,7 @@ FocusScope {
                 isTranscoding:      d.forceTranscode || false,
                 selectedAudioId:    d.selectedAudioId,
                 selectedSubtitleId: d.selectedSubtitleId,
+                markers:            d.markers || [],
                 // A shuffle card is a jukebox: report no timeline, so it leaves the
                 // show's watched state and Continue Watching untouched.
                 trackProgress:      d.trackProgress !== false,

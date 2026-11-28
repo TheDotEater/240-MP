@@ -143,10 +143,20 @@ FocusScope {
             moduleSettingsRoot.dynamicOptions = updated
             // Capability changes affect schema filtering — rebuild the model so
             // settings with requires_capability appear/disappear immediately.
-            if (key === "_capabilities")
+            if (key === "_capabilities") {
                 buildModel()
-            else
+                // Gated settings were filtered out when Component.onCompleted
+                // kicked the option slots, so a dynamic one that has just become
+                // visible would otherwise show "---" and refuse to cycle. Option
+                // slots only emit their own key, so this cannot loop.
+                for (var i = 0; i < schemaItems.length; i++) {
+                    var it = schemaItems[i]
+                    if (it.requires_capability && it.options_source === "dynamic" && it.options_slot)
+                        appCore.invoke_module_action(moduleSettingsRoot.moduleId, it.options_slot)
+                }
+            } else {
                 settingsList.forceLayout()
+            }
         }
         function onModuleAuthStateChanged(mid) {
             if (mid !== moduleSettingsRoot.moduleId) return

@@ -182,7 +182,8 @@ FocusScope {
                 selectedSubtitleUrl: subUrl,
                 sessionId: detailRoot.sessionId,
                 isTranscoding: d.forceTranscode || false,
-                imageSubtitleIds: imageSubs
+                imageSubtitleIds: imageSubs,
+                markers: d.markers || []
             }, {})
         }
 

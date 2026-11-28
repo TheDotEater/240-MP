@@ -75,6 +75,16 @@
       "requires_auth": true
     },
     {
+      "key": "skip_credits",
+      "label": "Skip Intro/Credits",
+      "type": "list_single",
+      "options_source": "dynamic",
+      "options_slot": "get_skip_credits_options",
+      "default": "off",
+      "requires_auth": true,
+      "requires_capability": "plexpass"
+    },
+    {
       "key": "logout",
       "label": "Sign out",
       "type": "action",

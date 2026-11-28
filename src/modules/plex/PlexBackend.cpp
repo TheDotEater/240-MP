@@ -771,6 +771,69 @@ void PlexBackend::performUserSwitch(const QString &userId, const QString &pin,
     });
 }
 
+// ---------------------------------------------------------------------------
+// Plex Pass (intro/credits skip gating)
+// ---------------------------------------------------------------------------
+
+bool PlexBackend::has_plex_pass() const {
+    return loadAuth()["account_plex_pass"].toBool();
+}
+
+// ModuleSettings shows a requires_capability setting only when its name is in
+// this list; skip_credits requires "plexpass".
+void PlexBackend::emitCapabilities() {
+    emit dynamicOptionsReady("_capabilities",
+        has_plex_pass() ? QVariantList{QStringLiteral("plexpass")} : QVariantList{});
+}
+
+// Asks plex.tv whether the signed-in account has Plex Pass. Always the master
+// token: the question is about the account (see has_plex_pass), and it is the
+// one plex.tv credential that is always on hand — a profile's switch token is
+// never stored, and the owner's is a PMS-only legacy token plex.tv rejects.
+void PlexBackend::fetchPlexPass() {
+    const QString token = accountToken();
+    if (token.isEmpty() || m_plexPassFetchInFlight) return;
+    m_plexPassFetchInFlight = true;
+
+    auto *reply = plexGet(QUrl(PLEX_TV + "/api/v2/user"), token);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        m_plexPassFetchInFlight = false;
+        if (reply->error() != QNetworkReply::NoError) {
+            // Keep the cached answer, and leave m_plexPassRefreshed unset so the
+            // next Settings visit tries again. A transient failure must not hide
+            // settings from an account that has the Pass.
+            qWarning().noquote() << "[Plex] Plex Pass check failed — status="
+                                 << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+                                 << reply->errorString();
+            return;
+        }
+        m_plexPassRefreshed = true;
+
+        // subscription.active is the direct answer; the "plexpass" role is the
+        // same fact in the form plex.tv uses for permissions, and covers a
+        // response that omits the subscription block.
+        QJsonObject user = QJsonDocument::fromJson(reply->readAll()).object();
+        bool pass = user["subscription"].toObject()["active"].toBool()
+                 || user["roles"].toArray().contains(QJsonValue("plexpass"));
+
+        QJsonObject a = loadAuth();
+        // A response from an account that has since signed out must not
+        // recreate the auth file logout just deleted.
+        if (a["auth_token"].toString().isEmpty()) return;
+        bool changed = !a.contains("account_plex_pass")
+                    || a["account_plex_pass"].toBool() != pass;
+        a["account_plex_pass"] = pass;
+        // Left by an earlier build that gated on per-user entitlements.
+        a.remove("user_entitlements");
+        saveAuth(a);
+
+        // Only re-emit on a change: getUsers already reported the cached value,
+        // and every emit makes Settings rebuild its list.
+        if (changed) emitCapabilities();
+    });
+}
+
 QString PlexBackend::accountToken() const {
     return loadAuth()["auth_token"].toString();
 }
@@ -1862,6 +1925,16 @@ QString PlexBackend::mediaFilePath(const QJsonObject &meta) {
     return partArr.first().toObject()["file"].toString();
 }
 
+// /library/metadata/{key} for a fetch whose result is handed to the Player.
+// includeMarkers makes PMS attach the intro/credits markers buildItemDetail
+// reads; they are only returned when asked for. Browse-only fetches (extras,
+// show year) don't need them and keep using the bare URL.
+static QUrl playableMetadataUrl(const QString &serverUri, const QString &ratingKey) {
+    QUrl url(serverUri + "/library/metadata/" + ratingKey);
+    url.setQuery(QUrlQuery{{"includeMarkers", "1"}});
+    return url;
+}
+
 QVariantMap PlexBackend::buildItemDetail(const QJsonObject &meta) const {
     const QString uri = serverUrl();
     // Guard against metadata with no media/part (e.g. an item the server can't
@@ -1922,6 +1995,24 @@ QVariantMap PlexBackend::buildItemDetail(const QJsonObject &meta) const {
              << "| playback:" << (forceTranscode ? "transcode" : "direct play");
     int duration = meta["duration"].toInt();
 
+    // Intro/credits markers for the Player's skip support (present only when the
+    // fetch asked for includeMarkers). Offsets are in file time, which matches
+    // mpv's position on both paths because a transcode is always requested from
+    // offset 0. "final" flags the credits marker that runs to the end of the
+    // episode. Other marker types (commercial) are not skippable here.
+    QVariantList markers;
+    for (const auto &mv : meta["Marker"].toArray()) {
+        QJsonObject mk = mv.toObject();
+        QString mtype = mk["type"].toString();
+        if (mtype != "intro" && mtype != "credits") continue;
+        markers.append(QVariantMap{
+            {"type",    mtype},
+            {"startMs", mk["startTimeOffset"].toInt()},
+            {"endMs",   mk["endTimeOffset"].toInt()},
+            {"final",   mk["final"].toBool()},
+        });
+    }
+
     return QVariantMap{
         {"ratingKey",        meta["ratingKey"].toString()},
         {"guid",             meta["guid"].toString()},
@@ -1947,6 +2038,7 @@ QVariantMap PlexBackend::buildItemDetail(const QJsonObject &meta) const {
         {"parentTitle",      meta["parentTitle"].toString()},
         {"parentYear",       meta["parentYear"].toVariant()},
         {"grandparentRatingKey", meta["grandparentRatingKey"].toString()},
+        {"markers",          markers},
     };
 }
 
@@ -1981,7 +2073,7 @@ void PlexBackend::load_show_year(const QString &showRatingKey) {
 
 void PlexBackend::load_item_detail(const QString &ratingKey) {
     QString uri = serverUrl(), token = serverToken();
-    auto *reply = plexGet(QUrl(uri + "/library/metadata/" + ratingKey), token);
+    auto *reply = plexGet(playableMetadataUrl(uri, ratingKey), token);
     connect(reply, &QNetworkReply::finished, this, [this, reply, ratingKey]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
@@ -2141,7 +2233,7 @@ void PlexBackend::load_next_episode(const QString &currentRatingKey) {
             if (nextKey.isEmpty()) { emit nextEpisodeReady(QVariantMap{}); return; }
 
             // Step 3: fetch the next episode's full metadata and build playable detail.
-            auto *detailReply = plexGet(QUrl(uri + "/library/metadata/" + nextKey), token);
+            auto *detailReply = plexGet(playableMetadataUrl(uri, nextKey), token);
             connect(detailReply, &QNetworkReply::finished, this,
                     [this, detailReply, currentRatingKey]() {
                 detailReply->deleteLater();
@@ -2268,7 +2360,7 @@ QString PlexBackend::takeFromShuffleBag(const QString &scopeRatingKey,
 // Loads a chosen episode's full detail and emits it as the card's result.
 void PlexBackend::emitCardDetail(const QString &ratingKey, bool trackProgress,
                                  const QString &scopeRatingKey) {
-    auto *reply = plexGet(QUrl(serverUrl() + "/library/metadata/" + ratingKey), serverToken());
+    auto *reply = plexGet(playableMetadataUrl(serverUrl(), ratingKey), serverToken());
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, trackProgress, scopeRatingKey]() {
         reply->deleteLater();
@@ -2294,7 +2386,7 @@ void PlexBackend::emitCardDetail(const QString &ratingKey, bool trackProgress,
 // An empty map means "nothing to advance to", which the Player treats as the end.
 void PlexBackend::emitNextEpisode(const QString &ratingKey) {
     if (ratingKey.isEmpty()) { emit nextEpisodeReady(QVariantMap{}); return; }
-    auto *reply = plexGet(QUrl(serverUrl() + "/library/metadata/" + ratingKey), serverToken());
+    auto *reply = plexGet(playableMetadataUrl(serverUrl(), ratingKey), serverToken());
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
@@ -2886,6 +2978,16 @@ void PlexBackend::getUsers() {
         options.append(QVariantMap{{"id",u["id"].toString()},{"label",u["title"].toString()}});
     }
     emit dynamicOptionsReady("current_user_id", options);
+
+    // current_user_id is always visible once signed in, so this slot runs on every
+    // Settings load — the place to hand Settings the cached Plex Pass state (its
+    // dynamicOptions are rebuilt each time the screen is created). Answer from
+    // the cache at once, then refresh in the background once per session, or
+    // straight away when nothing is cached yet (a new sign-in, or an install
+    // that predates the check). A change is re-emitted when the reply lands.
+    emitCapabilities();
+    if (!m_plexPassRefreshed || !auth.contains("account_plex_pass"))
+        fetchPlexPass();
 }
 
 void PlexBackend::getServers() {
@@ -2918,6 +3020,20 @@ void PlexBackend::get_resume_playback_options() {
     QVariantMap yes; yes["id"] = "yes"; yes["label"] = "Always";
     options << ask << yes;
     emit dynamicOptionsReady("resume_playback", options);
+}
+
+// Skip modes for the skip_credits setting: "off", "auto" (seek past the marker
+// silently) or "button" (open the OSD with SKIP focused).
+QVariantList PlexBackend::skipModeOptions() {
+    return QVariantList{
+        QVariantMap{{"id","off"},    {"label","Off"}},
+        QVariantMap{{"id","auto"},   {"label","Auto"}},
+        QVariantMap{{"id","button"}, {"label","Button"}},
+    };
+}
+
+void PlexBackend::get_skip_credits_options() {
+    emit dynamicOptionsReady("skip_credits", skipModeOptions());
 }
 
 void PlexBackend::getLibraries() {

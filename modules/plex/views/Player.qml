@@ -66,6 +66,18 @@ FocusScope {
     property int lastKnownPositionMs: 0
     property int lastKnownDurationMs: 0
 
+    // Intro/credits skip. markers come from buildItemDetail ({type, startMs,
+    // endMs, final}); skipMode is "off", "auto" or "button", resolved once by
+    // resolveSkipMode. activeMarkerIdx is the marker the playhead is inside (-1
+    // for none). skippedMarkers records markers already auto-skipped by index, so
+    // rewinding into one plays it instead of skipping again — per marker rather
+    // than per type because an episode can carry more than one credits marker.
+    property var    markers:          navParams.markers || []
+    property string skipMode:         "off"
+    property int    activeMarkerIdx:  -1
+    property var    skippedMarkers:   ({})
+    property bool   skipPromptShown:  false
+
     focus: true
 
     Keys.onPressed: function(event) {
@@ -246,6 +258,56 @@ FocusScope {
         return m + ":" + (sec < 10 ? "0" : "") + sec
     }
 
+    // Resolve the skip mode from the skip_credits setting; it applies to intro
+    // and credits markers alike. Nothing applies without Plex Pass on the
+    // signed-in account: module settings are shared by every profile and outlive
+    // a lapsed subscription, so the stored value alone isn't enough (see
+    // PlexBackend::has_plex_pass).
+    function resolveSkipMode() {
+        skipMode = plexBackend.has_plex_pass()
+                 ? (appCore.get_setting(moduleRoot.moduleId, "skip_credits") || "off")
+                 : "off"
+    }
+
+    function findActiveMarker(ms) {
+        for (var i = 0; i < markers.length; i++) {
+            if (ms >= markers[i].startMs && ms < markers[i].endMs) return i
+        }
+        return -1
+    }
+
+    // Called on every position update while there are markers. Acts only when the
+    // playhead crosses into or out of a marker.
+    function trackMarkers(ms) {
+        var idx = findActiveMarker(ms)
+        if (idx === activeMarkerIdx) return
+        activeMarkerIdx = idx
+
+        var mode = "off"
+        if (idx >= 0) {
+            mode = skipMode
+            if (mode === "auto" && skippedMarkers[idx]) mode = "off"
+        }
+
+        if (mode === "auto") {
+            markSkipped(idx)
+            // Skipping the final credits seeks to (about) the end of the file,
+            // which lands on the ordinary EOF path — autoplay / queue advance.
+            mpvController.seekTo(markers[idx].endMs)
+        }
+
+        var wantPrompt = (mode === "button")
+        if (wantPrompt && !skipPromptShown)      mpvController.showOsdSkipPrompt()
+        else if (!wantPrompt && skipPromptShown) mpvController.clearOsdPrompt()
+        skipPromptShown = wantPrompt
+    }
+
+    function markSkipped(idx) {
+        var s = Object.assign({}, skippedMarkers)
+        s[idx] = true
+        skippedMarkers = s
+    }
+
     Connections {
         target: plexBackend
         function onErrorOccurred(msg) { console.log("[Player] Backend error: " + msg) }
@@ -322,6 +384,10 @@ FocusScope {
         lastKnownPositionMs  = 0
         lastKnownDurationMs  = 0
         sessionId            = newSessionId()
+        // This episode's markers; the per-marker skip state belonged to the last
+        // one. (The OSD's own SKIP state went with the previous mpv process.)
+        markers              = detail.markers || []
+        skippedMarkers       = ({})
 
         // Repoint the BACK target so exiting returns to THIS episode's detail
         // screen, not the one we auto-advanced from. Item.qml reloads from
@@ -378,13 +444,29 @@ FocusScope {
                 // First position update means mpv is up and playing — drop the
                 // loading indicator (mpv's own window now covers the screen).
                 playerRoot.playbackStarted = true
+                if (playerRoot.markers.length > 0) playerRoot.trackMarkers(ms)
             }
         }
         function onDurationChanged(ms) {
             if (ms > 0) playerRoot.lastKnownDurationMs = ms
         }
 
+        // SKIP pressed in the OSD (mpv-osc.lua → MpvController::skipRequested).
+        function onSkipRequested() {
+            var idx = playerRoot.activeMarkerIdx
+            if (idx < 0) return
+            playerRoot.markSkipped(idx)
+            mpvController.seekTo(playerRoot.markers[idx].endMs)
+            mpvController.clearOsdPrompt()
+            playerRoot.skipPromptShown = false
+        }
+
         function onPlaybackEnded(finalPositionMs, finalDurationMs, reason) {
+            // mpv has exited and taken its OSD state with it. Reset ours so the
+            // next launch (transcode retry or the next episode) starts clean.
+            playerRoot.activeMarkerIdx = -1
+            playerRoot.skipPromptShown = false
+
             if (reason === "failed") {
                 if (!isTranscoding) {
                     // Direct play failed (e.g. HTTP 500 from PMS on WAN). Retry
@@ -447,6 +529,7 @@ FocusScope {
         // once the user touches it, but accept the legacy "ON" string too.
         var autoplayRaw = appCore.get_setting(moduleRoot.moduleId, "autoplay_next_episode")
         autoplayNext  = allowAutoplay && (autoplayRaw === true || autoplayRaw === "ON")
+        resolveSkipMode()
 
         if (resumeSetting === "ask" && viewOffset > 0) {
             overlayVisible = true
